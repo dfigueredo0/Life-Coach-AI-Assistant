@@ -1,0 +1,5 @@
+env: dev
+log_level: INFO
+db_url: '' # Postgres URL
+redis_url: 'redis://localhost:6379/0'
+api_port: 8000

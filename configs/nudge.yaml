@@ -1,0 +1,4 @@
+max_per_day: 8
+cooldown_minutes: 90
+focus_mode_suppression: true
+recovery_after_miss_hours: 2
