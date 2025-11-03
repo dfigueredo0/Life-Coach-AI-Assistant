@@ -1,0 +1,15 @@
+sft_data:
+  train_file: 'data/processed/sft_train.jsonl'
+  val_file: 'data/processed/sft_val.jsonl'
+
+oassst_raw:
+  trees_file: 'data/raw/oasst/2023-04-12_oasst_ready.trees.jsonl.gz'
+  messages_file: 'data/raw/oasst/2023-04-12_oasst_ready.messages.jsonl.gz'
+
+filters:
+  min_assistant_tokens: 25
+  languages: ['en']
+
+domain_tags:
+  include_energy_tags: true
+  include_location_tags: true

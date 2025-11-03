@@ -1,0 +1,44 @@
+backbone_name: 'stabilityai/stablelm-2-12b'
+revision: null
+use_8bit: false
+seed: 42
+deterministic: true
+
+special_tokens:
+  user: '<|user|>'
+  assistant: '<|assistant|>'
+  system: '<|system|>'
+  end: '<|endoftext|>'
+
+sft:
+  max_seq_len: 2040
+  per_device_train_bastch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  num_train_epochs: 2
+  warmup_ratio: 0.03
+  fp16: true
+  bf16: false
+  gradient_checkpointing: true
+  eval_steps: 500
+  save_steps: 1000
+  logging_steps: 50
+  early_stopping_patience: 3
+  output_dir: 'artifacts/sft'
+
+  reward_model:
+    name: 'distilroberta-base'
+    num_labels: 1
+    learning_rate: 1.0e-5
+    per_device_train_bastch_size: 4
+    num_train_epochs: 1
+    output_dir: 'artifacts/rm'
+
+  ppo:
+    learning_rate: 1.4e-5
+    batch_size: 64
+    mini_batch_size: 16
+    ppo_epochs: 4
+    target_kl: 0.1
+    output_dir: 'artifacts/ppo'
