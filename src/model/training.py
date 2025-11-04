@@ -9,39 +9,51 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from dataclasses import dataclass
 from pathlib import Path
-from transformers import AutModelForCausalLM, Trainer, TrainingArguments, EarlyStoppingCallback
+from transformers import AutoModelForCausalLM, Trainer, TrainingArguments, EarlyStoppingCallback
 
+from data.collators import DataCollator
 from model.tokenizer import load_tokenizer
 from model.sft_dataset import SFTJsonlDataset
 
-def set_deterministic(seed: int, determinsitc: bool = True):
+def set_deterministic(seed: int, deterministic: bool = True):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    if determinsitc:
-        torch.use_deterministic_alogrithms(True, warn_only=True)
+    if deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
         os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
         
 @hydra.main(config_path='../../configs', config_name='model', version_base='1.3')
 def main(cfg: DictConfig):
     print('Config:\n', OmegaConf.to_yaml(cfg))
-    
     set_deterministic(cfg.seed, cfg.deterministic)
+    
     mlflow.set_experiment('sft')
     with mlflow.start_run():
+        mlflow.log_params(OmegaConf.to_container(cfg, resolve=True))
+        
         tok_bundle = load_tokenizer(cfg.backbone_name, cfg.special_tokens)
         tokenizer = tok_bundle.tokenizer
+        specials = tok_bundle.special
         
-        model = AutModelForCausalLM.from_pretrained(cfg.backbone_name)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
+        model = AutoModelForCausalLM.from_pretrained(cfg.backbone_name)
         model.resize_token_embeddings(len(tokenizer))
         
         data_cfg = OmegaConf.load(Path(hydra.utils.get_original_cwd()) / "configs" / "data.yaml")
-        train_ds = SFTJsonlDataset(Path(data_cfg.sft_data.train_file), tokenizer, cfg.special_tokens, cfg.sft.max_seq_len)
-        val_ds = SFTJsonlDataset(Path(data_cfg.sft_data.val_file), tokenizer, cfg.special_tokens, cfg.sft.max_seq_len)
+        train_ds = SFTJsonlDataset(Path(data_cfg.sft_data.train_file), tokenizer, specials, cfg.sft.max_seq_len)
+        val_ds = SFTJsonlDataset(Path(data_cfg.sft_data.val_file), tokenizer, specials, cfg.sft.max_seq_len)
+        
+        collator = DataCollatorForSFT(tokenizer=tokenizer, max_length=cfg.sft.max_seq_len, mask_user=True)
+
+        out_dir = Path(cfg.sft.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
         
         args = TrainingArguments(
-            output_dir=cfg.sft.output_dir,
+            output_dir=str(out_dir),
             per_device_train_batch_size=cfg.sft.per_device_train_batch_size,
             per_device_eval_batch_size=max(1, cfg.sft.per_device_train_batch_size),
             gradient_accumulation_steps=cfg.sft.gradient_accumulation_steps,
@@ -66,13 +78,18 @@ def main(cfg: DictConfig):
             args=args,
             train_dataset=train_ds,
             eval_dataset=val_ds,
+            data_collator=collator,
             tokenizer=tokenizer,
             callbacks=[EarlyStoppingCallback(early_stopping_patience=cfg.sft.early_stopping_patience)],
         )
 
-        trainer.train()
-        trainer.save_model(cfg.sft.output_dir)
-        tokenizer.save_pretrained(cfg.sft.output_dir)
+        #checkpoint_dir = Path(cfg.sft.checkpoint_dir)
+        #checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        trainer.train(resume_from_checkpoint=True)
+        trainer.save_model(str(out_dir))
+        tokenizer.save_pretrained(str(out_dir))
+        mlflow.log_artifacts(str(out_dir))
         
 if __name__ == '__main__':
     main()

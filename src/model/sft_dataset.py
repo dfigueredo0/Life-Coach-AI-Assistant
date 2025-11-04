@@ -18,15 +18,16 @@ def _stream_jsonl(path: Path) -> Iterator[Dict]:
             if line.strip():
                 yield json.loads(line)
 
+
 def _format_turns(rec: Dict, sp: Dict[str, str]) -> str:
     buf = []
     for t in rec['turns']:
         if t['role'] == 'user':
             buf.append(f"{sp['user']}{t['text']}{sp['end']}")
-        elif t['role'] == 'assistnat':
-            buf.append(F"{sp['assistant']}{t['text']}{sp['end']}")
+        elif t['role'] == 'assistant':
+            buf.append(f"{sp['assistant']}{t['text']}{sp['end']}")
         elif t['role'] == 'system':
-            buf.append(F"{sp['system']}{t['text']}{sp['end']}")
+            buf.append(f"{sp['system']}{t['text']}{sp['end']}")
     return ''.join(buf)
 
 class SFTJsonlDataset(Dataset):

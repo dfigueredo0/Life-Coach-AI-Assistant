@@ -20,10 +20,18 @@ class TokenizerBundle:
     special: Dict[str, str]
     
 def load_tokenizer(backbone_name: str, special_tokens: Dict[str, str]) -> TokenizerBundle:
-    token = AutoTokenizer.from_pretrained(backbone_name, use_fast=True, padding_side="right", truncation_side="right")
-    added = token.add_special_tokens(SPECIAL_TOKENS)
-    if token.eos_token is None:
-        token.eos_token = "<|endoftext|>"
-    if token.pad_token is None:
-        token.pad_token = token.eos_token
-    return TokenizerBundle(tokenizer=token, special=special_tokens)
+    tok = AutoTokenizer.from_pretrained(backbone_name, use_fast=True, padding_side="right", truncation_side="right")
+    tok.add_special_tokens(SPECIAL_TOKENS)
+    if tok.eos_token is None:
+        tok.eos_token = "<|endoftext|>"
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    
+    special = {
+        "user": "<|user|>",
+        "assistant": "<|assistant|>",
+        "system": "<|system|>",
+        "end": "<|endoftext|>",
+    }
+    
+    return TokenizerBundle(tokenizer=tok, special=special)
