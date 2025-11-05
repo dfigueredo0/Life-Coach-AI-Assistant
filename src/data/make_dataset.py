@@ -10,6 +10,8 @@ from transformers import PreTrainedTokenizerBase
 
 from .transforms import to_sft_record, to_ppo_record, PlanPrefs
 
+class LifeCoachData
+
 class PPOJSONLDataset(Dataset):
     def __init__(self, jsonl_path: str | Path, tokenizer: PreTrainedTokenizerBase, max_query_len: int = 1024, max_response_len: int = 512):
         self.path = Path(jsonl_path)
@@ -30,7 +32,7 @@ class PPOJSONLDataset(Dataset):
             truncation=True,
             max_length=max_len,
             padding=False,
-            add_special_tokens=False,  # you already embedded role tokens in the string
+            add_special_tokens=False,  # already embedded role tokens in the string
             return_tensors="pt",
         )
         return enc["input_ids"].squeeze(0)
