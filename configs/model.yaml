@@ -4,6 +4,25 @@ use_8bit: false
 seed: 42
 deterministic: true
 
+trainer:
+  backend: auto
+  amp: false # True = CUDA enable; False = DML enable
+  epochs: 100
+  batch_size: 64
+  lr: 0.001
+  wd: 1e-4
+  lr_scheduler: 'cosine'
+  lr_warmup_epochs: 5
+  grad_clip_norm: 5.0
+  amp: true
+  deterministic: true
+  seed: 0
+  early_stopping:
+    monitor: 'val/macro_auroc'
+    patience: 10
+    mode: 'max'
+  checkpoint_dir: './checkpoints'
+
 special_tokens:
   user: '<|user|>'
   assistant: '<|assistant|>'

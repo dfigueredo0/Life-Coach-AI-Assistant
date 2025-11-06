@@ -1,6 +1,7 @@
 sft_data:
-  train_file: 'data/processed/sft_train.jsonl'
-  val_file: 'data/processed/sft_val.jsonl'
+  train_file: data/sft_train.jsonl
+  val_file: data/sft_val.jsonl
+  test_file: data/sft_test.jsonl
 
 raw_data:
   trees_file: 'data/raw/trees.jsonl.gz'

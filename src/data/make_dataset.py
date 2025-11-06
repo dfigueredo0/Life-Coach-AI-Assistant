@@ -10,7 +10,21 @@ from transformers import PreTrainedTokenizerBase
 
 from .transforms import to_sft_record, to_ppo_record, PlanPrefs
 
-class LifeCoachData
+class LifeCoachData(Dataset):
+    def __init__(self, path: str):
+        self.rows = []
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                self.rows.append(json.loads(line))
+    
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, idx: int) -> Dict[str, str]:
+        ex = self.rows[idx]
+        input = f"PROFILE: {ex['user_profile']} GOAL: {ex['goal_description']}"
+        target = _flatten_target(ex['plan'], ex['nudges'])
+        return {'input_text': input, 'target_text': target}
 
 class PPOJSONLDataset(Dataset):
     def __init__(self, jsonl_path: str | Path, tokenizer: PreTrainedTokenizerBase, max_query_len: int = 1024, max_response_len: int = 512):
@@ -58,6 +72,11 @@ class PPOJSONLDataset(Dataset):
             item["response_tensors"] = self._tok(r["response"], self.max_r)
 
         return item
+    
+def _flatten_target(plan: List[Dict[str, Any]], nudges: List[str]) -> str:
+    plan_str = " | ".join([f"{s['step_id']}. {s['description']} [{s['energy']}/{s['location']}/{s['minutes']}m]" for s in plan])
+    nudges_str = " | ".join(nudges)
+    return f"PLAN: {plan_str} || NUDGES: {nudges_str}"
 
 def _read_any(path: Path) -> Iterable[Dict[str, Any]]:
     open_fn = gzip.open if path.suffix == ".gz" else open

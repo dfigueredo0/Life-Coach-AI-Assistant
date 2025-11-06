@@ -5,7 +5,11 @@ description = "AI assistant that plans and nudges users towards goals with adapt
 authors = ["Dylan Figueredo <dfigueredo@hawk.illinoistech.edu>", "Jon Wu <@hawk.illinoistech.edu>", "Dhruv Ojha <@hawk.illinoistech.edu>", "Raunak Ali Syed <@hawk.illinoistech.edu>"]
 license = "MIT"
 readme = "README.md"
-packages = [{include = "", from = "src"}]
+packages = [
+  { include = "data", from = "src" },
+  { include = "model", from = "src" },
+  { include = "scripts", from = "src" }
+]
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -43,6 +47,13 @@ ruff = "^0.6.7"
 black = "^24.8.0"
 isort = "^5.13.2"
 pre-commit = "^3.8.0"
+
+[tool.poetry.scripts]
+lc-synth = "data.synth_seed:main"
+lc-make-datasets = "data.make_dataset:main"
+lc-split-sft = "data.split_sft:main"
+lc-data-all = "scripts.pipeline:main"
+lc-train = "model.training:main"
 
 [tool.ruff]
 line-length = 100
