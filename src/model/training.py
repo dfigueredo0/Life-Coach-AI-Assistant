@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os, argparse, random, importlib, contextlib
+import os, random, importlib, contextlib
 import numpy as np
 import torch
 import mlflow
@@ -8,6 +8,7 @@ import hydra
 
 from omegaconf import DictConfig, OmegaConf
 from dataclasses import dataclass
+from glob import glob
 from pathlib import Path
 from transformers import AutoModelForCausalLM, Trainer, TrainingArguments, EarlyStoppingCallback
 
@@ -23,16 +24,6 @@ def set_deterministic(seed: int, deterministic: bool = True):
     if deterministic:
         torch.use_deterministic_algorithms(True, warn_only=True)
         os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-
-def _has_torch_cuda() -> bool:
-    try:
-        import torch
-        return torch.cuda.is_available()
-    except Exception:
-        return False
-
-def _has_directml() -> bool:
-    return importlib.util.find_spec("torch_directml") is not None 
         
 def setup_accelertor(cfg):
     """
@@ -42,12 +33,52 @@ def setup_accelertor(cfg):
       scaler: torch.amp.GradScaler or dummy (None) when AMP off
       notes: string describing backend
     """
+    want = (getattr(cfg, "trainer", None) and getattr(cfg.trainer, "backend", "auto")) or "auto"
     use_amp_flag = bool(getattr(cfg, "trainer", None) and getattr(cfg.trainer, "amp", False))
 
-    if _has_torch_cuda():  # NVIDIA CUDA or AMD ROCm (HIP) — both surface as torch.cuda
+    def has_cuda():
+        try:
+            import torch
+            return torch.cuda.is_available()
+        except Exception:
+            return False
+
+    def has_dml():
+        return importlib.util.find_spec("torch_directml") is not None
+
+    if want == "cuda":
+        if not has_cuda():
+            print("[warn] trainer.backend=cuda requested but CUDA not available. Falling back to CPU.")
+        else:
+            import torch
+            device = torch.device("cuda")
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision("high")
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+            except Exception:
+                pass
+            use_amp = bool(use_amp_flag and torch.cuda.is_available())
+            scaler = torch.amp.GradScaler(enabled=use_amp)
+            autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=use_amp)
+            return device, autocast_ctx, scaler, "torch.cuda (CUDA/ROCm)"
+
+    if want == "dml":
+        if has_dml():
+            import torch_directml
+            device = torch_directml.device()
+            return device, contextlib.nullcontext(), None, "torch-directml (DirectML)"
+        else:
+            print("[warn] trainer.backend=dml requested but torch-directml not found. Falling back to CPU.")
+
+    if want == "cpu":
+        import torch
+        return torch.device("cpu"), contextlib.nullcontext(), None, "CPU"
+
+    if has_cuda():
         import torch
         device = torch.device("cuda")
-        # Backend perf toggles (safe on ROCm; TF32 will be ignored on AMD)
         torch.backends.cudnn.benchmark = True
         try:
             torch.set_float32_matmul_precision("high")
@@ -55,26 +86,16 @@ def setup_accelertor(cfg):
             torch.backends.cudnn.allow_tf32 = True
         except Exception:
             pass
-        use_amp = bool(cfg.trainer.amp and torch.cuda.is_available())
+        use_amp = bool(use_amp_flag and torch.cuda.is_available())
         scaler = torch.amp.GradScaler(enabled=use_amp)
         autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=use_amp)
-        notes = "torch.cuda (CUDA/ROCm)"
-        
-        return device, autocast_ctx, scaler, notes
-    elif _has_directml():  # Windows fallback for AMD via DirectML
+        return device, autocast_ctx, scaler, "torch.cuda (CUDA/ROCm)"
+    elif has_dml():
         import torch_directml
-        device = torch_directml.device()
-        scaler = None  # AMP not supported via torch-directml
-        autocast_ctx =  contextlib.nullcontext()
-        notes = "torch-directml (DirectML)"
-        return device, autocast_ctx, scaler, notes
+        return torch_directml.device(), contextlib.nullcontext(), None, "torch-directml (DirectML)"
     else:
         import torch
-        device = torch.device("cpu")
-        scaler = None
-        autocast_ctx = contextlib.nullcontext()
-        notes = "CPU"
-        return device, autocast_ctx, scaler, notes
+        return torch.device("cpu"), contextlib.nullcontext(), None, "CPU"
 
 def make_fast_loaders(ds_train, ds_val, train_bs, eval_bs, pin=True):
     """
@@ -100,8 +121,10 @@ def to_device(x, device):
         return x.to(device, non_blocking=non_blocking)
     return x
 
-@hydra.main(config_path='../../configs', config_name='model', version_base='1.3')
-def main(cfg: DictConfig):    
+@hydra.main(config_path=None, config_name=None, version_base='1.3')
+def main(cfg_: DictConfig):    
+    _cfg = OmegaConf.load(Path(hydra.utils.get_original_cwd()) / "configs" / "model.yaml")
+    cfg = OmegaConf.merge(_cfg, cfg_)
     print('Config:\n', OmegaConf.to_yaml(cfg))
     set_deterministic(cfg.seed, cfg.deterministic)
     
@@ -172,13 +195,12 @@ def main(cfg: DictConfig):
                 callbacks=[EarlyStoppingCallback(early_stopping_patience=cfg.sft.early_stopping_patience)],
                     )
 
-            mlflow.set_experiment('sft')
-            with mlflow.start_run():
-                mlflow.log_params(OmegaConf.to_container(cfg, resolve=True))
-                trainer.train(resume_from_checkpoint=True)
-                trainer.save_model(str(out_dir))
-                tokenizer.save_pretrained(str(out_dir))
-                mlflow.log_artifacts(str(out_dir))
+            ckpts = sorted(glob(str(out_dir / "checkpoint-*")), key=lambda p: int(p.split("-")[-1]))
+            resume = ckpts[-1] if ckpts else None
+            trainer.train(resume_from_checkpoint=resume)
+            trainer.save_model(str(out_dir))
+            tokenizer.save_pretrained(str(out_dir))
+            mlflow.log_artifacts(str(out_dir))
             return
         
     print("[info] Using custom training loop for DirectML")
@@ -215,41 +237,37 @@ def main(cfg: DictConfig):
     best_val = float("inf")
     out_dir = Path(cfg.sft.output_dir); out_dir.mkdir(parents=True, exist_ok=True)
 
-    mlflow.set_experiment('sft')
-    with mlflow.start_run():
-        mlflow.log_params(OmegaConf.to_container(cfg, resolve=True))
+    step = 0
+    for epoch in range(cfg.sft.num_train_epochs):
+        for batch in train_dl:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            with autocast_ctx:
+                outputs = model(**batch)
+                loss = outputs.loss
 
-        step = 0
-        for epoch in range(cfg.sft.num_train_epochs):
-            for batch in train_dl:
-                # move to DML device
-                batch = {k: v.to(device) for k, v in batch.items()}
-                with autocast_ctx:
-                    outputs = model(**batch)
-                    loss = outputs.loss
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.sft.max_grad_norm if "max_grad_norm" in cfg.sft else 1.0)
+            opt.step()
 
-                opt.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.sft.max_grad_norm if "max_grad_norm" in cfg.sft else 1.0)
-                opt.step()
+            step += 1
+            if step % log_every == 0:
+                print(f"epoch {epoch} step {step}/{total_steps}  loss {loss.item():.4f}")
+                mlflow.log_metric("train_loss", float(loss.item()), step=step)
 
-                step += 1
-                if step % log_every == 0:
-                    print(f"epoch {epoch} step {step}/{total_steps}  loss {loss.item():.4f}")
-
-                if step % eval_every == 0:
-                    val_loss = _run_eval()
-                    print(f"[val] step {step}  loss {val_loss:.4f}")
-                    mlflow.log_metric("train_loss", float(loss.item()), step=step)
-                    mlflow.log_metric("val_loss", float(val_loss), step=step)
-                    if val_loss < best_val:
-                        best_val = val_loss
-                        torch.save(model.state_dict(), out_dir / "best_dml.pt")
-
-        # final save (HF format requires config too)
-        model.save_pretrained(str(out_dir))
-        tokenizer.save_pretrained(str(out_dir))
-        mlflow.log_artifacts(str(out_dir))
+            if step % eval_every == 0:
+                val_loss = _run_eval()
+                print(f"[val] step {step}  loss {val_loss:.4f}")
+                mlflow.log_metric("val_loss", float(val_loss), step=step)
+                if val_loss < best_val:
+                    best_val = val_loss
+                    cpu_sd = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+                    torch.save(cpu_sd, out_dir / "best_dml.pt")
+    model.eval()
+    model.to("cpu")
+    model.save_pretrained(str(out_dir))
+    tokenizer.save_pretrained(str(out_dir))
+    mlflow.log_artifacts(str(out_dir))
         
 if __name__ == '__main__':
     main()

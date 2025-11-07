@@ -54,6 +54,7 @@ lc-make-datasets = "data.make_dataset:main"
 lc-split-sft = "data.split_sft:main"
 lc-data-all = "scripts.pipeline:main"
 lc-train = "model.training:main"
+lc-eval = "eval:main"
 
 [tool.ruff]
 line-length = 100

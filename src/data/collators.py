@@ -24,6 +24,11 @@ class DataCollator:
     max_length: int = 2048
     mask_user: bool = True
     
+    def __init__(self, tokenizer, max_length: int = 1024, mask_user: bool = True):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.mask_user = mask_user
+    
     def __post_init__(self):
         self.tok_id_user = self.tokenizer.convert_tokens_to_ids("<|user|>")
         self.tok_id_assistant = self.tokenizer.convert_tokens_to_ids("<|assistant|>")
@@ -51,27 +56,23 @@ class DataCollator:
                     break
             i += 1
     
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        texts = [f.get('text') or f.get('rendered_text') for f in features]
+    def __call__(self, batch):
+        texts = []
+        for ex in batch:
+            t = ex.get("text")
+            if not isinstance(t, str):
+                # if a downstream change returned something else, stringify to avoid crashes
+                t = str(t)
+            texts.append(t)
+
         enc = self.tokenizer(
             texts,
-            max_length=self.max_length,
-            truncation=True,
             padding=True,
-            return_tensors="pt"
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
         )
-        input_ids = enc['inputs_ids']
-        attention_mask = enc['attention_mask']
-        labels = input_ids.clone()
-        
-        if self.mask_user:
-            for b in range(input_ids.size(0)):
-                self._mask_user_segments(input_ids[b], labels[b])
-                
-        batch = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels
-        }
-        
-        return batch
+
+        # Causal LM: labels are input_ids shifted in the model; pass labels = input_ids
+        enc["labels"] = enc["input_ids"].clone()
+        return enc

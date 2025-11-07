@@ -12,38 +12,44 @@ from transformers import PreTrainedTokenizerBase
 class DialogExample:
     text: str
     
-def _stream_jsonl(path: Path) -> Iterator[Dict]:
-    with(open(path, 'r', encoding='utf-8')) as f:
-        for line in f:
-            if line.strip():
-                yield json.loads(line)
-
-
-def _format_turns(rec: Dict, sp: Dict[str, str]) -> str:
-    buf = []
-    for t in rec['turns']:
-        if t['role'] == 'user':
-            buf.append(f"{sp['user']}{t['text']}{sp['end']}")
-        elif t['role'] == 'assistant':
-            buf.append(f"{sp['assistant']}{t['text']}{sp['end']}")
-        elif t['role'] == 'system':
-            buf.append(f"{sp['system']}{t['text']}{sp['end']}")
-    return ''.join(buf)
-
 class SFTJsonlDataset(Dataset):
     def __init__(self, file: Path, tokenizer: PreTrainedTokenizerBase, special: Dict[str, str], max_len: int):
-        self.tokenizer = tokenizer
-        self.special = special
+        self.path = Path(file)
+        self.rows = []
+        with self.path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    self.rows.append(json.loads(line))
         self.max_len = max_len
-        self.examples: List[DialogExample] = []
-        for rec in _stream_jsonl(file):
-            self.examples.append(DialogExample(text=_format_turns(rec=rec, sp=special)))
+        self.specials = special
+        self.tokenizer = tokenizer
             
     def __len__(self):
-        return len(self.examples)
+        return len(self.rows)
     
-    def __getitem__(self, idx: int) -> Dict[str, any]:
-        text = self.examples[idx].text
-        tokens = self.tokenizer(text, max_length=self.max_len, truncation=True, padding='max_length', return_tensors='pt')
-        tokens['labels'] = tokens['input_ids'].clone()
-        return {k: v.squeeze(0) for k, v in tokens.items()}
+    def _linearize_turns(self, turns):
+        sys_tok = self.specials.get("system", "<|system|>")
+        usr_tok = self.specials.get("user", "<|user|>")
+        as_tok  = self.specials.get("assistant", "<|assistant|>")
+        end_tok = self.specials.get("end", "<|endoftext|>")
+
+        pieces = []
+        for t in turns:
+            role = t.get("role","")
+            content = t.get("content","")
+            if role == "system":    pieces.append(f"{sys_tok}{content}{end_tok}")
+            elif role == "user":    pieces.append(f"{usr_tok}{content}{end_tok}")
+            elif role == "assistant": pieces.append(f"{as_tok}{content}{end_tok}")
+            else:                   pieces.append(content)
+        return "".join(pieces)
+
+    def __getitem__(self, idx):
+        r = self.rows[idx]
+        if isinstance(r.get("text"), str):
+            text = r["text"]
+        elif "turns" in r:
+            text = self._linearize_turns(r["turns"])
+        else:
+            # last resort: stringify
+            text = str(r)
+        return {"text": text}
