@@ -7,6 +7,13 @@ raw_data:
   trees_file: 'data/raw/trees.jsonl.gz'
   messages_file: 'data/raw/messages.jsonl.gz'
 
+reward_data:
+  train_file: 'data/rm_train.jsonl'
+  val_file: 'data//rm_val.jsonl'
+
+ppo_data:
+  prompts: 'data/ppo_prompts.jsonl'
+
 filters:
   min_assistant_tokens: 25
   languages: ['en']

@@ -14,7 +14,7 @@ from transformers import AutoModelForCausalLM, Trainer, TrainingArguments, Early
 
 from data.collators import DataCollator
 from model.tokenizer import load_tokenizer
-from model.sft_dataset import SFTJsonlDataset
+from data.sft_dataset import SFTJsonlDataset
 
 def set_deterministic(seed: int, deterministic: bool = True):
     random.seed(seed)
@@ -153,12 +153,13 @@ def main(cfg_: DictConfig):
         
         model = AutoModelForCausalLM.from_pretrained(cfg.backbone_name)
         model.resize_token_embeddings(len(tokenizer))
+        to_device(model, device=device)
         
         data_cfg = OmegaConf.load(Path(hydra.utils.get_original_cwd()) / "configs" / "data.yaml")
         train_ds = SFTJsonlDataset(Path(data_cfg.sft_data.train_file), tokenizer, specials, cfg.sft.max_seq_len)
         val_ds = SFTJsonlDataset(Path(data_cfg.sft_data.val_file), tokenizer, specials, cfg.sft.max_seq_len)
         
-        collator = DataCollator(tokenizer=tokenizer, max_length=cfg.sft.max_seq_len, mask_user=True)
+        collator = DataCollator(tokenizer=tokenizer, max_length=cfg.sft.max_seq_len)
 
         out_dir = Path(cfg.sft.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -203,71 +204,71 @@ def main(cfg_: DictConfig):
             mlflow.log_artifacts(str(out_dir))
             return
         
-    print("[info] Using custom training loop for DirectML")
-    from torch.utils.data import DataLoader
+        print("[info] Using custom training loop for DirectML")
+        from torch.utils.data import DataLoader
 
-    per_device_bs = cfg.sft.per_device_train_batch_size
-    eval_bs = max(1, per_device_bs)
+        per_device_bs = cfg.sft.per_device_train_batch_size
+        eval_bs = max(1, per_device_bs)
 
-    train_dl = DataLoader(train_ds, batch_size=per_device_bs, shuffle=True, num_workers=4,
-                          collate_fn=collator, pin_memory=False, persistent_workers=True)
-    val_dl   = DataLoader(val_ds,   batch_size=eval_bs,  shuffle=False, num_workers=4,
-                          collate_fn=collator, pin_memory=False, persistent_workers=True)
+        train_dl = DataLoader(train_ds, batch_size=per_device_bs, shuffle=True, num_workers=4,
+                            collate_fn=collator, pin_memory=False, persistent_workers=True)
+        val_dl   = DataLoader(val_ds,   batch_size=eval_bs,  shuffle=False, num_workers=4,
+                            collate_fn=collator, pin_memory=False, persistent_workers=True)
 
-    model.to(device)
-    model.train()
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.sft.learning_rate, weight_decay=cfg.sft.weight_decay)
-
-    def _run_eval():
-        model.eval()
-        tot, n = 0.0, 0
-        with torch.no_grad():
-            for batch in val_dl:
-                batch = {k: v.to(device) for k, v in batch.items()}
-                outputs = model(**batch)
-                loss = outputs.loss
-                tot += float(loss.detach().cpu()); n += 1
+        model.to(device)
         model.train()
-        return tot / max(1, n)
+        opt = torch.optim.AdamW(model.parameters(), lr=cfg.sft.learning_rate, weight_decay=cfg.sft.weight_decay)
 
-    total_steps = (len(train_dl) * cfg.sft.num_train_epochs)
-    log_every   = max(1, cfg.sft.logging_steps)
-    eval_every  = max(1, cfg.sft.eval_steps)
+        def _run_eval():
+            model.eval()
+            tot, n = 0.0, 0
+            with torch.no_grad():
+                for batch in val_dl:
+                    batch = {k: v.to(device) for k, v in batch.items()}
+                    outputs = model(**batch)
+                    loss = outputs.loss
+                    tot += float(loss.detach().cpu()); n += 1
+            model.train()
+            return tot / max(1, n)
 
-    best_val = float("inf")
-    out_dir = Path(cfg.sft.output_dir); out_dir.mkdir(parents=True, exist_ok=True)
+        total_steps = (len(train_dl) * cfg.sft.num_train_epochs)
+        log_every   = max(1, cfg.sft.logging_steps)
+        eval_every  = max(1, cfg.sft.eval_steps)
 
-    step = 0
-    for epoch in range(cfg.sft.num_train_epochs):
-        for batch in train_dl:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            with autocast_ctx:
-                outputs = model(**batch)
-                loss = outputs.loss
+        best_val = float("inf")
+        out_dir = Path(cfg.sft.output_dir); out_dir.mkdir(parents=True, exist_ok=True)
 
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.sft.max_grad_norm if "max_grad_norm" in cfg.sft else 1.0)
-            opt.step()
+        step = 0
+        for epoch in range(cfg.sft.num_train_epochs):
+            for batch in train_dl:
+                batch = {k: v.to(device) for k, v in batch.items()}
+                with autocast_ctx:
+                    outputs = model(**batch)
+                    loss = outputs.loss
 
-            step += 1
-            if step % log_every == 0:
-                print(f"epoch {epoch} step {step}/{total_steps}  loss {loss.item():.4f}")
-                mlflow.log_metric("train_loss", float(loss.item()), step=step)
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.sft.max_grad_norm if "max_grad_norm" in cfg.sft else 1.0)
+                opt.step()
 
-            if step % eval_every == 0:
-                val_loss = _run_eval()
-                print(f"[val] step {step}  loss {val_loss:.4f}")
-                mlflow.log_metric("val_loss", float(val_loss), step=step)
-                if val_loss < best_val:
-                    best_val = val_loss
-                    cpu_sd = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-                    torch.save(cpu_sd, out_dir / "best_dml.pt")
-    model.eval()
-    model.to("cpu")
-    model.save_pretrained(str(out_dir))
-    tokenizer.save_pretrained(str(out_dir))
-    mlflow.log_artifacts(str(out_dir))
+                step += 1
+                if step % log_every == 0:
+                    print(f"epoch {epoch} step {step}/{total_steps}  loss {loss.item():.4f}")
+                    mlflow.log_metric("train_loss", float(loss.item()), step=step)
+
+                if step % eval_every == 0:
+                    val_loss = _run_eval()
+                    print(f"[val] step {step}  loss {val_loss:.4f}")
+                    mlflow.log_metric("val_loss", float(val_loss), step=step)
+                    if val_loss < best_val:
+                        best_val = val_loss
+                        cpu_sd = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+                        torch.save(cpu_sd, out_dir / "best_dml.pt")
+        model.eval()
+        model.to("cpu")
+        model.save_pretrained(str(out_dir))
+        tokenizer.save_pretrained(str(out_dir))
+        mlflow.log_artifacts(str(out_dir))
         
 if __name__ == '__main__':
     main()

@@ -24,10 +24,9 @@ class DataCollator:
     max_length: int = 2048
     mask_user: bool = True
     
-    def __init__(self, tokenizer, max_length: int = 1024, mask_user: bool = True):
+    def __init__(self, tokenizer, max_length: int = 1024):
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.mask_user = mask_user
     
     def __post_init__(self):
         self.tok_id_user = self.tokenizer.convert_tokens_to_ids("<|user|>")

@@ -1,6 +1,6 @@
 from pathlib import Path
 import json
-from src.model.sft_dataset import SFTJsonlDataset
+from data.sft_dataset import SFTJsonlDataset
 from src.model.tokenizer import load_tokenizer
 
 def test_special_tokens_and_filter(tmp_path: Path):
