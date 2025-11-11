@@ -8,8 +8,8 @@ readme = "README.md"
 packages = [
   { include = "data", from = "src" },
   { include = "model", from = "src" },
-  { include = "scripts", from = "src" },
-  { include = "utils", from = "src"}
+  { include = "utils", from = "src"},
+  { include = "metrics", from ="src"}
 ]
 
 [tool.poetry.dependencies]
@@ -55,9 +55,10 @@ lc-make-datasets = "data.make_dataset:main"
 lc-split-sft = "data.split_sft:main"
 lc-data-all = "utils.pipeline:main"
 lc-train = "model.training:main"
-lc-eval = "eval:main"
+lc-eval = "metrics.eval:main"
 lc-rm = "model.rlhf.reward_model:main"
 lc-ppo = "model.rlhf.ppo_train:main"
+lc-make-rm = "utils.make_rm_pairs:main"
 
 [tool.ruff]
 line-length = 100

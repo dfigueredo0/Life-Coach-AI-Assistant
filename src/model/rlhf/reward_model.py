@@ -1,69 +1,74 @@
-import json
+from __future__ import annotations
+import argparse, torch
 from pathlib import Path
-import torch
-from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, get_scheduler
-from dataclasses import dataclass
-from tqdm import tqdm
+from torch import nn
+from torch.utils.data import DataLoader
+from transformers import AutoModel, AutoTokenizer
+from data.rm_dataset import RMPairs, collate_rm
 
-@dataclass
-class RMDataset(Dataset):
-    file: Path
-    tokenizer: AutoTokenizer
-    max_len: int
+class RewardHead(nn.Module):
+    def __init__(self, hidden: int):
+        super().__init__()
+        self.scorer = nn.Linear(hidden, 1)
 
-    def __post_init__(self):
-        self.items = []
-        with open(self.file, "r", encoding="utf-8") as f:
-            for line in f:
-                self.items.append(json.loads(line))
+    def forward(self, last_hidden_state, attention_mask):
+        cls = last_hidden_state[:, 0, :]  # [B, H]
+        return self.scorer(cls).squeeze(-1)
 
-    def __getitem__(self, idx):
-        ex = self.items[idx]
-        prompt = ex["prompt"]
-        chosen = ex["chosen"]
-        rejected = ex["rejected"]
+class RewardModel(nn.Module):
+    def __init__(self, base: str):
+        super().__init__()
+        self.encoder = AutoModel.from_pretrained(base)
+        self.head = RewardHead(self.encoder.config.hidden_size)
 
-        return {
-            "chosen": self.tokenizer(f"{prompt}\n{chosen}", truncation=True, max_length=self.max_len, return_tensors="pt"),
-            "rejected": self.tokenizer(f"{prompt}\n{rejected}", truncation=True, max_length=self.max_len, return_tensors="pt")
-        }
+    def score(self, input_ids, attention_mask):
+        out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        return self.head(out.last_hidden_state, attention_mask)
 
-    def __len__(self):
-        return len(self.items)
-    
-def main(cfg):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def forward(self, pos_input_ids, pos_attention_mask, neg_input_ids, neg_attention_mask):
+        pos = self.score(pos_input_ids, pos_attention_mask)
+        neg = self.score(neg_input_ids, neg_attention_mask)
+        return pos, neg
 
-        tokenizer = AutoTokenizer.from_pretrained(cfg.backbone_name)
-        model = AutoModelForSequenceClassification.from_pretrained(
-            cfg.backbone_name,
-            num_labels=1
-        ).to(device)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pairs", default="data/rm_pairs.jsonl")
+    ap.add_argument("--base", default="distilroberta-base")
+    ap.add_argument("--out", default="artifacts/rm")
+    ap.add_argument("--epochs", type=int, default=1)
+    ap.add_argument("--bsz", type=int, default=16)
+    ap.add_argument("--lr", type=float, default=2e-5)
+    args = ap.parse_args()
 
-        ds = RMDataset(Path("data/rm/rm_train.jsonl"), tokenizer, cfg.rm.max_seq_len)
-        dl = DataLoader(ds, batch_size=cfg.rm.per_device_train_batch_size, shuffle=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # DML is unreliable here; use CPU/CUDA
+    tok = AutoTokenizer.from_pretrained(args.base, use_fast=True)
+    ds = RMPairs(args.pairs, tok, max_len=512)
+    dl = DataLoader(ds, batch_size=args.bsz, shuffle=True, collate_fn=collate_rm, num_workers=0)
 
-        opt = torch.optim.AdamW(model.parameters(), lr=cfg.rm.learning_rate)
-        steps = len(dl) * cfg.rm.num_train_epochs
+    model = RewardModel(args.base).to(device).train()
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    loss_fn = nn.MarginRankingLoss(margin=0.1)
 
-        sched = get_scheduler("linear", opt, steps, int(steps * cfg.rm.warmup_ratio))
+    step = 0
+    for epoch in range(args.epochs):
+        for batch in dl:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            pos, neg = model(**batch)
+            target = torch.ones_like(pos)
+            loss = loss_fn(pos, neg, target)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            step += 1
+            if step % 50 == 0:
+                print(f"step {step} loss {loss.item():.4f}")
 
-        for epoch in range(cfg.rm.num_train_epochs):
-            for batch in tqdm(dl):
-                chosen = {k: v.squeeze(1).to(device) for k, v in batch["chosen"].items()}
-                rejected = {k: v.squeeze(1).to(device) for k, v in batch["rejected"].items()}
+    out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
+    # Save encoder + head (separately)
+    tok.save_pretrained(out)
+    model.encoder.save_pretrained(out)
+    torch.save(model.head.state_dict(), out / "head.pt")
+    print(f"Saved RM to {out}")
 
-                chosen_scores = model(**chosen).logits
-                rejected_scores = model(**rejected).logits
-
-                loss = -torch.nn.functional.logsigmoid(chosen_scores - rejected_scores).mean()
-
-                loss.backward()
-                opt.step()
-                sched.step()
-                opt.zero_grad()
-
-        Path(cfg.rm.output_dir).mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(cfg.rm.output_dir)
-        tokenizer.save_pretrained(cfg.rm.output_dir)
+if __name__ == "__main__":
+    main()
